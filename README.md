@@ -78,8 +78,9 @@ fail with the list of choices.
 - `~/.config/ddd/config.json` (0600): name, email, phone, default tip percent.
 - `~/.config/ddd/state.json`: the open cart's guid, the session token, cached operation
   hashes. `DDD_CONFIG_DIR` moves both.
-- Card details go into the macOS Keychain (`ddd card set`, item "ddd-card") or are typed at
-  checkout. They are encrypted in memory for the payment call and never written by this
+- Card details go into the macOS Keychain (`ddd card set`, item "ddd-card"), come from
+  `DDD_CARD_NUMBER`, `DDD_CARD_EXP` (MM/YY), `DDD_CARD_CVV`, `DDD_CARD_ZIP` and optional
+  `DDD_CARD_NAME` in the environment (for scripts), or are typed at checkout. They are encrypted in memory for the payment call and never written by this
   tool. On other platforms there is no storage; checkout prompts.
 
 ## Status

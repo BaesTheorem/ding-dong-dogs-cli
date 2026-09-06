@@ -219,3 +219,18 @@ def test_selection_input_scales_modifier_quantity_with_the_item():
     sel = cart.selection_input(it, 2, mods, None)
     assert sel["quantity"] == 2
     assert sel["modifierGroups"][0]["modifiers"][0]["quantity"] == 2
+
+
+def test_card_from_env(monkeypatch):
+    from dddcli import checkout
+    monkeypatch.delenv("DDD_CARD_NUMBER", raising=False)
+    assert checkout.card_from_env() is None
+    monkeypatch.setenv("DDD_CARD_NUMBER", "4111 1111 1111 1111")
+    monkeypatch.setenv("DDD_CARD_EXP", "11/30")
+    monkeypatch.setenv("DDD_CARD_CVV", "165")
+    monkeypatch.setenv("DDD_CARD_ZIP", "64112")
+    card = checkout.card_from_env()
+    assert card.last4 == "1111" and card.exp_month == "11" and card.exp_year == "30" and card.zip_code == "64112"
+    monkeypatch.setenv("DDD_CARD_NUMBER", "1234")
+    with pytest.raises(checkout.PaymentError, match="DDD_CARD_"):
+        checkout.card_from_env()

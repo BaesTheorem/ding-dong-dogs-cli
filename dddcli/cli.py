@@ -315,9 +315,13 @@ class Cli:
         if self.args.dry_run:
             print("Dry run: cart validated, nothing charged.")
             return 0
-        card = checkout.load_card()
-        if card and not self.args.new_card:
-            print(f"    Paying with saved {card.label}")
+        card = checkout.card_from_env()
+        if card:
+            print(f"    Paying with {card.label} from the environment")
+        elif not self.args.new_card:
+            card = checkout.load_card()
+            if card:
+                print(f"    Paying with saved {card.label}")
         if not self.args.yes:
             answer = input(f"Place this order for {cartmod.money(total)}? [y/N] ").strip().lower()
             if answer not in ("y", "yes"):

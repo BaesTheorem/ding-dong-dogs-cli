@@ -133,6 +133,21 @@ def clear_card() -> bool:
     return r.returncode == 0
 
 
+def card_from_env() -> Card | None:
+    """DDD_CARD_NUMBER, DDD_CARD_EXP (MM/YY), DDD_CARD_CVV, DDD_CARD_ZIP, optional DDD_CARD_NAME.
+    For scripts and agents that cannot answer a prompt; the process environment is the only
+    place the card exists."""
+    import os
+    number = os.environ.get("DDD_CARD_NUMBER")
+    if not number:
+        return None
+    try:
+        return normalize_card(number, os.environ.get("DDD_CARD_EXP", ""), os.environ.get("DDD_CARD_CVV", ""),
+                              os.environ.get("DDD_CARD_ZIP", ""), os.environ.get("DDD_CARD_NAME"))
+    except PaymentError as e:
+        raise PaymentError(f"DDD_CARD_* environment: {e}") from None
+
+
 def prompt_card(name_default: str | None = None) -> Card:
     print("Card details (kept in memory only; `ddd card set` stores them in the Keychain).")
     number = getpass.getpass("Card number: ")
