@@ -1,0 +1,30 @@
+[project]
+name = "ding-dong-dogs-cli"
+version = "0.1.0"
+description = "Order takeout from Ding Dong Dogs in Kansas City from the terminal, over the Toast online-ordering API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["curl_cffi>=0.10"]
+
+[project.scripts]
+ddd = "dddcli.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dddcli"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = ["F", "E4", "E7", "E9", "B"]
+ignore = ["B008", "E401", "E701", "E702", "E731", "E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
