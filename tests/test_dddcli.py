@@ -211,3 +211,11 @@ def test_place_order_uses_place_spi_order_shape():
     t = FakeTransport({"placeOrder": {"__typename": "PlaceOrderError", "placeOrderErrorCode": "PAYMENT_FAILED", "message": "declined"}})
     with pytest.raises(checkout.PaymentError, match="declined"):
         checkout.place_order(t, "cart1", {}, 0, intent, "pm1")
+
+
+def test_selection_input_scales_modifier_quantity_with_the_item():
+    it = menu.find(menu.flatten(MENUS), "hot dog")
+    mods = [{"guid": "mg1", "modifiers": [{"itemGuid": "c1", "itemGroupGuid": None, "quantity": 1, "modifierGroups": []}]}]
+    sel = cart.selection_input(it, 2, mods, None)
+    assert sel["quantity"] == 2
+    assert sel["modifierGroups"][0]["modifiers"][0]["quantity"] == 2

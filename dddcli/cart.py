@@ -41,6 +41,17 @@ def create_cart_input(restaurant_guid: str) -> dict:
     }
 
 
+def _with_quantity(groups: list[dict], quantity: int) -> list[dict]:
+    """Toast counts modifiers per parent quantity: two dogs with Grilled need Grilled x2,
+    or the server answers "select all required modifiers"."""
+    out = []
+    for g in groups:
+        mods = [{**m, "quantity": quantity, "modifierGroups": _with_quantity(m.get("modifierGroups") or [], quantity)}
+                for m in g.get("modifiers") or []]
+        out.append({**g, "modifiers": mods})
+    return out
+
+
 def selection_input(item: Item, quantity: int, modifiers: list[dict], note: str | None) -> dict:
     return {
         "itemGuid": item.guid,
@@ -49,7 +60,7 @@ def selection_input(item: Item, quantity: int, modifiers: list[dict], note: str 
         "quantity": quantity,
         "specialInstructions": note or "",
         "fractionalQuantity": None,
-        "modifierGroups": modifiers,
+        "modifierGroups": _with_quantity(modifiers, quantity),
     }
 
 
