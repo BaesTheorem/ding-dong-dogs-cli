@@ -85,15 +85,24 @@ fail with the list of choices.
 
 ## Status
 
-Verified live against Ding Dong Dogs on 2026-09-06: hours, menu, item choices, add with
-modifiers and notes, remove, clear, ASAP and scheduled pickup, pre-checkout validation,
-payment intent creation and tip update, and card tokenization (a Visa test number was
-accepted by Toast's payments API and returned a payment method id). The last two steps of
-checkout, confirming the payment and `placeSpiOrder`, are written from the ordering app's
-own code but have not been run with a real card yet, so a live checkout is the test.
-If confirm fails the cart is untouched and nothing is charged; if the order call fails after
-a successful confirm, the authorization expires on its own (capture only happens with the
-order).
+Working end to end: hours, menu, item choices, add with modifiers and notes, remove, clear,
+ASAP and scheduled pickup, pre-checkout validation. All verified live against Ding Dong Dogs
+on 2026-09-06.
+
+**Checkout does not complete, and it can leave a pending card authorization. Do not rely on
+`ddd checkout` for a live order yet.** The flow gets through payment: it creates and updates
+the payment intent, tokenizes the card, and the confirm step authorizes it (the card sees a
+pending hold for the order total). The final `placeSpiOrder` mutation then fails with
+`CRITICAL_ERROR: Sorry, your request failed due to an unknown error`, so no order is created.
+Capture only happens when the order is placed, so an uncaptured hold like that drops off on its own (a few
+days), but that is the bank's behavior, not something this tool guarantees.
+
+The input to `placeSpiOrder` matches what the web app builds (checked field by field against
+`public_*.min.js`, including `paymentIntentId` = the confirmed payment's `externalReferenceId`).
+The remaining difference is that the site's payment SDK polls the processor-status endpoint
+until the authorization settles before placing, and it feeds a real Sift fraud-session id as
+`ccFraudSessionId`; this client does neither. One of those, or a server-side capture step the
+API does not expose, is the likely cause. Until it is resolved, order through Toast's own page.
 
 Ding Dong Dogs is card-only for online orders (Toast reports no pay-at-pickup option), and
 only takeout is offered. Delivery, loyalty, gift cards and promo codes are not implemented.
