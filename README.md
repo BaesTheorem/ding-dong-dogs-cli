@@ -97,12 +97,12 @@ pending hold for the order total). The final `placeSpiOrder` mutation then fails
 Capture only happens when the order is placed, so an uncaptured hold like that drops off on its own (a few
 days), but that is the bank's behavior, not something this tool guarantees.
 
-The input to `placeSpiOrder` matches what the web app builds (checked field by field against
-`public_*.min.js`, including `paymentIntentId` = the confirmed payment's `externalReferenceId`).
-The remaining difference is that the site's payment SDK polls the processor-status endpoint
-until the authorization settles before placing, and it feeds a real Sift fraud-session id as
-`ccFraudSessionId`; this client does neither. One of those, or a server-side capture step the
-API does not expose, is the likely cause. Until it is resolved, order through Toast's own page.
+`placeSpiOrder` is confirmed to be the correct mutation, and the request matches the web app
+field for field. The failure is an unhandled server exception isolated to the SPI capture
+path (the same cart fails gracefully through the non-SPI mutation), and it reproduces even
+against an unconfirmed intent. It cannot be diagnosed further without a real authorized
+payment. See [DEBUGGING.md](DEBUGGING.md) for the full trace and the leading hypotheses.
+Until it is resolved, order through Toast's own page.
 
 Ding Dong Dogs is card-only for online orders (Toast reports no pay-at-pickup option), and
 only takeout is offered. Delivery, loyalty, gift cards and promo codes are not implemented.

@@ -341,13 +341,7 @@ class Cli:
         payment = confirmed.get("payment") or confirmed
         ref = payment.get("externalReferenceId") or intent["id"]
         who = {**customer, "phoneCountryCode": "1"}
-        try:
-            done = checkout.place_order(self.t, cart["guid"], who, tip, intent, pm_id, intent_ref=ref)
-        except checkout.PaymentError as first:
-            if ref == intent["id"]:
-                raise
-            self.t._log("retrying placeSpiOrder with the intent id after:", str(first))  # noqa: SLF001
-            done = checkout.place_order(self.t, cart["guid"], who, tip, intent, pm_id, intent_ref=intent["id"])
+        done = checkout.place_order(self.t, cart["guid"], who, tip, intent, pm_id, intent_ref=ref)
         self.state["last_order"] = {"guid": done.get("guid"), "placed": time.time()}
         self.remember_cart(None)
         if self.args.json:
