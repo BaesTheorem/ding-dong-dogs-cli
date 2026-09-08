@@ -269,3 +269,45 @@ def test_card_fields_survive_bracketed_paste():
     # A genuinely bad number must still be refused.
     with pytest.raises(checkout.PaymentError, match="valid card number"):
         checkout.normalize_card("4111111111111112", "11/30", "123", "64111", None)
+
+
+class SequenceTransport(FakeTransport):
+    """Returns a different response per call, so retry behaviour can be exercised."""
+
+    def __init__(self, responses):
+        super().__init__(None)
+        self.responses = list(responses)
+
+    def mutate(self, op, variables):
+        self.calls.append((op, variables))
+        return self.responses.pop(0)
+
+
+CRASH = {"placeOrder": {"__typename": "PlaceOrderError", "placeOrderErrorCode": "CRITICAL_ERROR", "message": "unknown error"}}
+DONE = {"placeOrder": {"__typename": "PlaceOrderResponse", "completedOrder": {"guid": "o1", "checkNumber": 42}}}
+
+
+def test_place_retries_only_the_server_crash(monkeypatch):
+    from dddcli import checkout
+    monkeypatch.setattr(checkout.time, "sleep", lambda _s: None)
+    intent = {"id": "pi", "sessionSecret": "sec"}
+
+    # A crash is an unhandled server exception, so it is worth waiting out. Retrying costs
+    # nothing because /confirm already made the authorization and placing adds no other.
+    t = SequenceTransport([CRASH, CRASH, DONE])
+    out = checkout.place_order_with_retry(t, "cart1", {}, 0, intent, "pm1", attempts=5)
+    assert out["checkNumber"] == 42
+    assert len(t.calls) == 3
+
+    # A refusal is a real answer. Do not hammer Toast with it.
+    declined = {"placeOrder": {"__typename": "PlaceOrderError", "placeOrderErrorCode": "PAYMENT_FAILED", "message": "declined"}}
+    t = SequenceTransport([declined, DONE])
+    with pytest.raises(checkout.PaymentError, match="declined"):
+        checkout.place_order_with_retry(t, "cart1", {}, 0, intent, "pm1", attempts=5)
+    assert len(t.calls) == 1
+
+    # Exhausting the attempts surfaces the crash rather than swallowing it.
+    t = SequenceTransport([CRASH, CRASH])
+    with pytest.raises(checkout.PlaceCrashed, match="CRITICAL_ERROR"):
+        checkout.place_order_with_retry(t, "cart1", {}, 0, intent, "pm1", attempts=2)
+    assert len(t.calls) == 2

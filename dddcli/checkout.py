@@ -26,6 +26,7 @@ import json
 import re
 import platform
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -41,6 +42,10 @@ KEYCHAIN_ACCOUNT = "ddd"
 
 class PaymentError(ToastError):
     pass
+
+
+class PlaceCrashed(PaymentError):
+    """placeSpiOrder threw CRITICAL_ERROR, an unhandled exception rather than a refusal."""
 
 
 @dataclass
@@ -317,7 +322,36 @@ def place_order(t: Transport, cart_guid: str, customer: dict, tip: float, intent
         return resp["completedOrder"]
     if kind == "PlaceOrderCartUpdatedError":
         raise PaymentError(f"Toast changed the cart while ordering ({resp.get('placeOrderCartUpdatedErrorCode')}): {resp.get('message')}. Check `ddd cart` and try again.")
-    raise PaymentError(f"Order not placed ({resp.get('placeOrderErrorCode') or kind}): {resp.get('message') or resp}")
+    code = resp.get("placeOrderErrorCode") or kind
+    if code == "CRITICAL_ERROR":
+        raise PlaceCrashed(f"Order not placed ({code}): {resp.get('message') or resp}")
+    raise PaymentError(f"Order not placed ({code}): {resp.get('message') or resp}")
+
+
+def place_order_with_retry(t: Transport, cart_guid: str, customer: dict, tip: float, intent: dict,
+                           payment_method_id: str, fraud_session_id: str | None = None,
+                           intent_ref: str | None = None, attempts: int = 5, delay: float = 4.0) -> dict:
+    """Place, retrying only when Toast throws its unhandled CRITICAL_ERROR.
+
+    Retrying is free. The card authorization is created by /confirm, and placing against
+    an already confirmed intent does not create another one, so a single hold pays for
+    every attempt here. That makes this the one way to test whether the capture failure
+    is a propagation race between confirm and place without spending another hold per try.
+
+    A graceful refusal (declined card, cart changed underneath) is a real answer and is
+    raised immediately; only the server-side crash is worth waiting out.
+    """
+    last: PlaceCrashed | None = None
+    for n in range(1, attempts + 1):
+        try:
+            return place_order(t, cart_guid, customer, tip, intent, payment_method_id,
+                               fraud_session_id=fraud_session_id, intent_ref=intent_ref)
+        except PlaceCrashed as e:
+            last = e
+            t._log(f"place attempt {n}/{attempts} crashed; " + (f"retrying in {delay:.0f}s" if n < attempts else "giving up"))  # noqa: SLF001
+            if n < attempts:
+                time.sleep(delay)
+    raise last  # type: ignore[misc]
 
 
 def completed_order(t: Transport, order_guid: str) -> dict:

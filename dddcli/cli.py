@@ -330,6 +330,7 @@ class Cli:
         if not card or self.args.new_card:
             card = checkout.prompt_card(f"{customer['firstName']} {customer['lastName']}")
         intent = checkout.create_intent(self.t, cart["guid"])
+        self.t._log("intent created for", f"{intent.get('amount')} vs cart total {int(round(total * 100))}")  # noqa: SLF001
         checkout.update_intent_if_needed(self.t, cart["guid"], intent, customer["email"], tip,
                                          float(order.get("taxV2") or 0), total)
         token = checkout.client_token(self.t)
@@ -342,7 +343,7 @@ class Cli:
         payment = confirmed.get("payment") or confirmed
         ref = payment.get("externalReferenceId") or intent["id"]
         who = {**customer, "phoneCountryCode": "1"}
-        done = checkout.place_order(self.t, cart["guid"], who, tip, intent, pm_id, intent_ref=ref)
+        done = checkout.place_order_with_retry(self.t, cart["guid"], who, tip, intent, pm_id, intent_ref=ref)
         self.state["last_order"] = {"guid": done.get("guid"), "placed": time.time()}
         self.remember_cart(None)
         if self.args.json:
