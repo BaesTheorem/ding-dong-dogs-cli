@@ -253,3 +253,19 @@ def test_update_intent_is_skipped_when_it_would_change_nothing():
     t = FakeTransport(ok)
     checkout.update_intent_if_needed(t, "cart1", intent, "a@b.c", 0, 0.48, 9.99)
     assert t.calls[0][0] == "UpdatePaymentIntent"
+
+
+def test_card_fields_survive_bracketed_paste():
+    from dddcli import checkout
+    # getpass reads the tty raw, so a value pasted from a password manager arrives
+    # wrapped in ESC[200~ ... ESC[201~. Those markers carry digits (200, 201) that used
+    # to survive the digits-only filter and blow the length check.
+    visa = "4111111111111111"  # documented test number, not anyone's card
+    card = checkout.normalize_card(
+        f"\x1b[200~{visa}\x1b[201~", "\x1b[200~11/30\x1b[201~", "\x1b[200~123\x1b[201~", " 64111 ", "Alex Hedtke"
+    )
+    assert card.number == visa
+    assert (card.exp_month, card.exp_year, card.cvv, card.zip_code) == ("11", "30", "123", "64111")
+    # A genuinely bad number must still be refused.
+    with pytest.raises(checkout.PaymentError, match="valid card number"):
+        checkout.normalize_card("4111111111111112", "11/30", "123", "64111", None)

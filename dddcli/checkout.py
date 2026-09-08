@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import re
 import platform
 import subprocess
 import uuid
@@ -69,7 +70,20 @@ class Card:
         return cls(d["number"], d["exp_month"], d["exp_year"], d["cvv"], d["zip_code"], d.get("name"))
 
 
+# getpass reads the tty raw, without readline, so a value pasted from a password manager
+# arrives wrapped in bracketed-paste markers (ESC[200~ ... ESC[201~). The digits in those
+# markers survive a digits-only filter and push a good 16-digit number out to 22, which
+# then fails the length check as "not a valid card number".
+_ESCAPES = re.compile(r"\x1b\[[0-9;]*[~a-zA-Z]|\x1b.|[\x00-\x1f\x7f]")
+
+
+def _clean(text: str) -> str:
+    """Drop terminal escape sequences and control characters from a typed or pasted field."""
+    return _ESCAPES.sub("", text or "").strip()
+
+
 def normalize_card(number: str, exp: str, cvv: str, zip_code: str, name: str | None) -> Card:
+    number, exp, cvv, zip_code, name = (_clean(number), _clean(exp), _clean(cvv), _clean(zip_code), _clean(name or ""))
     digits = "".join(ch for ch in number if ch.isdigit())
     if not 13 <= len(digits) <= 19 or not _luhn(digits):
         raise PaymentError("That does not look like a valid card number.")
