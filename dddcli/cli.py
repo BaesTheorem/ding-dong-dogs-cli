@@ -330,7 +330,8 @@ class Cli:
         if not card or self.args.new_card:
             card = checkout.prompt_card(f"{customer['firstName']} {customer['lastName']}")
         intent = checkout.create_intent(self.t, cart["guid"])
-        checkout.update_intent(self.t, cart["guid"], intent, customer["email"], tip, float(order.get("taxV2") or 0))
+        checkout.update_intent_if_needed(self.t, cart["guid"], intent, customer["email"], tip,
+                                         float(order.get("taxV2") or 0), total)
         token = checkout.client_token(self.t)
         pm = checkout.create_payment_method(self.t, token, intent, card, customer["email"])
         pm_id = pm.get("id") or pm.get("paymentMethodId")

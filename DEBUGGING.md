@@ -46,12 +46,22 @@ likely first:
    not.** The iframe loads Sift and Datadog RUM and may register the payment method with a
    device/session context the capture step dereferences. If so, this may not be drivable
    headlessly at all.
-2. **A superfluous `spiUpdatePaymentIntent` before confirm.** This client calls it to set
-   tip/tax even when the tip is 0; the site calls it only when the amount changes. Try
-   skipping it when the tip is 0.
+2. ~~**A superfluous `spiUpdatePaymentIntent` before confirm.**~~ Done, 2026-09-08.
+   `spiCreatePaymentIntent` already returns the tax-inclusive cart total (a $4.00 cart
+   with $0.48 tax creates an intent with `amount: 448`, `captureMethod: MANUAL`), so a
+   tipless order has nothing left to set and the site makes no update call. Skipping it
+   therefore cannot drop the tax, which was the reason to be careful about this one.
+   `update_intent_if_needed` now sends the update only when it would change the amount.
+   Untested against a real authorization.
 3. **A missing top-level `surchargeAmount`.** `oo-spi-surcharging-fe` is on for this
    restaurant, so the site adds `input.surchargeAmount` when a surcharge exists. Ding Dong
    Dogs has no surcharge, so this is the weakest lead.
+
+A redeploy does not clear this. After Toast shipped client version 3813 (`ddd refresh`
+re-read 100 hashes on 2026-09-08), the unconfirmed-intent probe still returns
+`CRITICAL_ERROR`. That is only weak evidence, though: an unconfirmed intent crashes
+capture whether or not the server bug is fixed, so this probe cannot tell the two apart.
+Do not read it as proof the bug survives.
 
 Reproduce the safe probes with a fresh `DDD_CONFIG_DIR`, a Tuesday+ pickup slot (the shop
 is closed Monday, so ASAP is off), and an unconfirmed intent. Never point a real confirmed

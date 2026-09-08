@@ -234,3 +234,22 @@ def test_card_from_env(monkeypatch):
     monkeypatch.setenv("DDD_CARD_NUMBER", "1234")
     with pytest.raises(checkout.PaymentError, match="DDD_CARD_"):
         checkout.card_from_env()
+
+
+def test_update_intent_is_skipped_when_it_would_change_nothing():
+    from dddcli import checkout
+    # spiCreatePaymentIntent already returns the tax-inclusive total, so a tipless
+    # order has nothing to update and the web app sends no update call.
+    intent = {"id": "pi", "sessionSecret": "sec", "amount": 448}
+    t = FakeTransport({})
+    assert checkout.update_intent_if_needed(t, "cart1", intent, "a@b.c", 0, 0.48, 4.48) is None
+    assert t.calls == []
+    # A tip changes the amount, so the update still goes out.
+    ok = {"oo": {"spiUpdatePaymentIntent": {"__typename": "OnlineOrderingSpiUpdatePaymentIntentSuccessResponse"}}}
+    t = FakeTransport(ok)
+    checkout.update_intent_if_needed(t, "cart1", intent, "a@b.c", 1.0, 0.48, 5.48)
+    assert t.calls[0][0] == "UpdatePaymentIntent"
+    # So does a mismatch between the intent and the cart, tip or no tip.
+    t = FakeTransport(ok)
+    checkout.update_intent_if_needed(t, "cart1", intent, "a@b.c", 0, 0.48, 9.99)
+    assert t.calls[0][0] == "UpdatePaymentIntent"

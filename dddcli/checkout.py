@@ -208,6 +208,22 @@ def update_intent(t: Transport, cart_guid: str, intent: dict, email: str, tip: f
     return _unwrap((data.get("oo") or {}).get("spiUpdatePaymentIntent"), "OnlineOrderingSpiUpdatePaymentIntentSuccessResponse", "payment intent update")
 
 
+def update_intent_if_needed(t: Transport, cart_guid: str, intent: dict, email: str, tip: float,
+                            tax: float, total: float) -> dict | None:
+    """Update the intent only when that actually changes the amount, as the site does.
+
+    spiCreatePaymentIntent already returns the tax-inclusive cart total (verified live
+    2026-09-08: a $4.00 cart carrying $0.48 tax creates an intent with amount 448), so
+    with no tip there is nothing left to set and the web app makes no update call at all.
+    Sending a redundant one is a suspect in the placeSpiOrder capture failure. Whenever
+    the amounts disagree the update still goes out, so this cannot under-authorize.
+    """
+    want = int(round(total * 100))
+    if not tip and intent.get("amount") == want:
+        return None
+    return update_intent(t, cart_guid, intent, email, tip, tax)
+
+
 def _payments_post(t: Transport, token: str, intent_id: str | None, path: str, body: dict) -> dict:
     headers = {
         "Content-Type": "application/json",
