@@ -394,15 +394,25 @@ def _clock(t: str) -> str:
     return datetime.strptime(t[:5], "%H:%M").strftime("%-I:%M %p")
 
 
+def _when_text(when, tz: ZoneInfo) -> str | None:
+    """A completed order carries estimatedFulfillmentDate as epoch milliseconds and
+    promisedDateTime as ISO text; render either in the restaurant's zone."""
+    try:
+        if isinstance(when, (int, float)) or (isinstance(when, str) and when.isdigit()):
+            dt = datetime.fromtimestamp(float(when) / 1000, tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+    except (ValueError, OverflowError, OSError):
+        return None
+    return dt.astimezone(tz).strftime("%A %-I:%M %p")
+
+
 def _order_text(o: dict, tz: ZoneInfo) -> str:
     lines = [f"Order placed: check #{o.get('checkNumber')}  ({o.get('approvalStatus')})"]
     when = o.get("estimatedFulfillmentDate") or o.get("promisedDateTime")
     if when:
-        try:
-            dt = datetime.fromisoformat(str(when).replace("Z", "+00:00")).astimezone(tz)
-            lines.append(f"Ready around {dt.strftime('%A %-I:%M %p')}")
-        except ValueError:
-            lines.append(f"Ready: {when}")
+        text = _when_text(when, tz)
+        lines.append(f"Ready around {text}" if text else f"Ready: {when}")
     for s in o.get("selections") or []:
         mods = ", ".join(m.get("name", "") for m in s.get("modifiers") or [])
         lines.append(f"  {s.get('quantity')} x {s.get('name')}" + (f" ({mods})" if mods else ""))

@@ -356,3 +356,14 @@ def test_place_retries_only_the_server_crash(monkeypatch):
     with pytest.raises(checkout.PlaceCrashed, match="CRITICAL_ERROR"):
         checkout.place_with_retry(t, placer(t), attempts=2)
     assert len(t.calls) == 2
+
+
+def test_order_text_renders_epoch_millis_and_iso_times():
+    from dddcli.cli import _order_text
+    ms = 1_800_000_000_000  # Toast sends estimatedFulfillmentDate as epoch milliseconds
+    want = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(TZ).strftime("%A %-I:%M %p")
+    text = _order_text({"checkNumber": 42, "estimatedFulfillmentDate": ms, "payments": []}, TZ)
+    assert f"Ready around {want}" in text
+    text = _order_text({"checkNumber": 42, "promisedDateTime": "2027-06-17T21:48:00Z", "payments": []}, TZ)
+    assert "Ready around Thursday 4:48 PM" in text
+    assert "Ready: nonsense" in _order_text({"promisedDateTime": "nonsense", "payments": []}, TZ)

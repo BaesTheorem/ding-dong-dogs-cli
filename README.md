@@ -89,17 +89,17 @@ Working end to end: hours, menu, item choices, add with modifiers and notes, rem
 ASAP and scheduled pickup, pre-checkout validation. All verified live against Ding Dong Dogs
 on 2026-09-06.
 
-**Checkout was rewritten to run the flow Toast's own order page runs. It has not been
-exercised live yet.** Toast has two card flows per
-restaurant, chosen by a feature flag the order page bootstraps (`oo-server-spi`). With it on,
-which is Ding Dong Dogs, the page tokenizes the card and hands the unconfirmed payment intent
-to `placeSpiOrder`; Toast authorizes, captures and creates the order in one step. With it
-off, the page confirms the intent itself (that is the card authorization) and then places
-with `placePaidOrder`. Earlier versions of this tool confirmed client-side and then called
-`placeSpiOrder`, a mix neither flow uses, and Toast answered with an unhandled
-`CRITICAL_ERROR`: no order, plus a pending hold that dropped on its own. `ddd checkout` now
-reads the flag from the page and runs the matching flow (`--dry-run` prints which). The
-diagnosis is in [DEBUGGING.md](DEBUGGING.md).
+**Checkout works.** Verified live (check number returned, payment authorized on the card at placement and captured
+by the restaurant on acceptance, as Toast does for its own page). Toast has two card flows
+per restaurant, chosen by a feature flag the order page bootstraps (`oo-server-spi`). With
+it on, which is Ding Dong Dogs, the page tokenizes the card and hands the unconfirmed
+payment intent to `placeSpiOrder`; Toast authorizes, captures and creates the order in one
+step. With it off, the page confirms the intent itself and then places with
+`placePaidOrder`. `ddd checkout` reads the flag from the page and runs the matching flow
+(`--dry-run` prints which). Earlier versions confirmed client-side and then
+called `placeSpiOrder`, a mix neither flow uses, which Toast answered with an unhandled
+`CRITICAL_ERROR`; the diagnosis is in [DEBUGGING.md](DEBUGGING.md). The client flow is
+implemented from the same bundle but has not been exercised against a live restaurant.
 
 Ding Dong Dogs is card-only for online orders (Toast reports no pay-at-pickup option), and
 only takeout is offered. Delivery, loyalty, gift cards and promo codes are not implemented.

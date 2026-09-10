@@ -75,13 +75,16 @@ and the update's `surchargeAmount` when `oo-spi-surcharging-fe` is on. One sessi
 generated per checkout and sent both as the intent's `sessionId` and the order's
 `ccFraudSessionId`, as the page does with its Sift session.
 
-## Still unverified
+## Verified
 
-The fix is derived from the page and the bundle, not yet from a placed order. The first
-real `ddd checkout` under the new flow is the test: it should return a check number and a
-Toast receipt email, and the card should show a capture rather than a hold. If it fails
-instead, where Toast stopped decides the cost: a refusal before its own confirm leaves
-nothing, a crash after it leaves one hold that drops like the earlier ones did.
+Live, through the new flow: `spiCreatePaymentIntent` returned `REQUIRES_PAYMENT_METHOD`
+with the tax-inclusive cart total in cents, the card tokenized, and `placeSpiOrder` answered with a
+`PlaceOrderResponse`: a check number, `approvalStatus: NEEDS_APPROVAL`, the payment
+`AUTHORIZED` for the full amount, `estimatedFulfillmentDate` about fifteen minutes out.
+No `/confirm` call was made by this tool; Toast authorized inside the placement, as the
+bundle said it would. (`AUTHORIZED` at placement is Toast's normal state for a new online
+order; the restaurant's acceptance captures it.) The client flow (`oo-server-spi` off) is
+implemented from the same bundle and unit-tested, but no live restaurant has exercised it.
 
 A related Toast defect, not this one: a quantity-N line carrying a priced modifier makes
 the cart and the created intent disagree by a cent (two quantity-1 lines match). The cart taxes the line whole, the intent looks
