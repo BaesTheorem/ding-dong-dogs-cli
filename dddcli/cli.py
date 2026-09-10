@@ -274,13 +274,15 @@ class Cli:
         if action == "set":
             card = checkout.prompt_card(" ".join(x for x in (self.store.profile.get("first"), self.store.profile.get("last")) if x) or None)
             checkout.save_card(card)
-            print(f"Saved {card.label} to the macOS Keychain.")
+            print(f"Saved {card.label} to the {checkout.card_store()}.")
             return 0
         if action == "clear":
             print("Removed the saved card." if checkout.clear_card() else "No saved card.")
             return 0
         card = checkout.load_card()
-        print(card.label if card else "No saved card. `ddd card set` stores one in the Keychain; otherwise checkout asks.")
+        store = checkout.card_store()
+        print(card.label if card else (f"No saved card. `ddd card set` stores one in the {store}; otherwise checkout asks."
+                                       if store else "No card store on this OS; checkout asks for the card."))
         return 0
 
     def customer(self) -> dict:
@@ -454,7 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("order", help="show the last (or a given) order"); s.add_argument("guid", nargs="?")
     s = sub.add_parser("profile", help="who the order is for")
     s.add_argument("--first"); s.add_argument("--last"); s.add_argument("--email"); s.add_argument("--phone"); s.add_argument("--tip-pct", type=float, help="default tip percent for checkout")
-    s = sub.add_parser("card", help="saved card in the macOS Keychain"); s.add_argument("action", nargs="?", choices=["show", "set", "clear"], default="show")
+    s = sub.add_parser("card", help="saved card in the OS credential store"); s.add_argument("action", nargs="?", choices=["show", "set", "clear"], default="show")
     s = sub.add_parser("refresh", help="re-read Toast's operation hashes from the live web bundle"); s.add_argument("--print", action="store_true")
     s = sub.add_parser("raw", help="run a persisted operation by name"); s.add_argument("operation"); s.add_argument("variables", nargs="?"); s.add_argument("--mutation", action="store_true")
     return p

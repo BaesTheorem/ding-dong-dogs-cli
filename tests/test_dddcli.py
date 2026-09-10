@@ -364,6 +364,46 @@ def test_order_text_renders_epoch_millis_and_iso_times():
     want = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(TZ).strftime("%A %-I:%M %p")
     text = _order_text({"checkNumber": 42, "estimatedFulfillmentDate": ms, "payments": []}, TZ)
     assert f"Ready around {want}" in text
-    text = _order_text({"checkNumber": 42, "promisedDateTime": "2027-06-17T21:48:00Z", "payments": []}, TZ)
-    assert "Ready around Thursday 4:48 PM" in text
+    iso = "2027-01-15T18:00:00Z"
+    want = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(TZ).strftime("%A %-I:%M %p")
+    text = _order_text({"checkNumber": 42, "promisedDateTime": iso, "payments": []}, TZ)
+    assert f"Ready around {want}" in text
     assert "Ready: nonsense" in _order_text({"promisedDateTime": "nonsense", "payments": []}, TZ)
+
+
+def test_card_store_dispatches_per_os(monkeypatch):
+    from dddcli import checkout
+    vault: dict[str, tuple[str, str]] = {}
+    monkeypatch.setattr(checkout, "_win_cred_write", lambda target, user, secret: vault.__setitem__(target, (user, secret)))
+    monkeypatch.setattr(checkout, "_win_cred_read", lambda target: vault.get(target, (None, None))[1])
+    monkeypatch.setattr(checkout, "_win_cred_delete", lambda target: vault.pop(target, None) is not None)
+    card = checkout.normalize_card("4111 1111 1111 1111", "11/30", "123", "64111", "A Name")
+
+    monkeypatch.setattr(checkout.platform, "system", lambda: "Windows")
+    assert checkout.card_store() == "Windows Credential Manager"
+    assert checkout.load_card() is None
+    checkout.save_card(card)
+    assert vault[checkout.CRED_TARGET][0] == checkout.KEYCHAIN_ACCOUNT
+    got = checkout.load_card()
+    assert got is not None and got.number == card.number and got.zip_code == "64111" and got.name == "A Name"
+    assert checkout.clear_card() is True and checkout.load_card() is None and checkout.clear_card() is False
+
+    monkeypatch.setattr(checkout.platform, "system", lambda: "Linux")
+    assert checkout.card_store() is None
+    assert checkout.load_card() is None and checkout.clear_card() is False
+    with pytest.raises(checkout.PaymentError, match="No card store"):
+        checkout.save_card(card)
+
+
+def test_windows_credential_struct_matches_wincred_layout():
+    import ctypes
+    from dddcli import checkout
+    credential_type = checkout._win_credential_struct()
+    # CREDENTIALW is 80 bytes on 64-bit Windows (two DWORDs, eight pointer-sized slots,
+    # one FILETIME, two more DWORDs, with natural alignment); a wrong field order or type
+    # would shift the size.
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        assert ctypes.sizeof(credential_type) == 80
+    names = [f[0] for f in credential_type._fields_]
+    assert names == ["Flags", "Type", "TargetName", "Comment", "LastWritten", "CredentialBlobSize", "CredentialBlob",
+                     "Persist", "AttributeCount", "Attributes", "TargetAlias", "UserName"]

@@ -33,6 +33,10 @@ uv venv && uv pip install -e .      # or: python3 -m venv .venv && .venv/bin/pip
 bin/ddd hours                        # bin/ddd prefers the repo venv; `ddd` is on PATH after pip install
 ```
 
+On Windows use the `ddd` entry point pip installs (`bin/ddd` is a shell script); the
+`tzdata` package comes along automatically there, since `zoneinfo` has no system database
+to read on Windows.
+
 ## Commands
 
 ```sh
@@ -56,7 +60,7 @@ ddd pickup +45m
 ddd pickup asap
 
 ddd profile --first Alex --last H --email you@example.com --phone 8165551234 --tip-pct 20
-ddd card set                       # card into the macOS Keychain (optional; checkout asks otherwise)
+ddd card set                       # card into the OS credential store (optional; checkout asks otherwise)
 ddd checkout                       # shows the total, asks, charges, prints the check number
 ddd checkout --tip 3 --yes         # no prompt
 ddd checkout --dry-run             # validate with Toast, charge nothing
@@ -78,10 +82,13 @@ fail with the list of choices.
 - `~/.config/ddd/config.json` (0600): name, email, phone, default tip percent.
 - `~/.config/ddd/state.json`: the open cart's guid, the session token, cached operation
   hashes. `DDD_CONFIG_DIR` moves both.
-- Card details go into the macOS Keychain (`ddd card set`, item "ddd-card"), come from
-  `DDD_CARD_NUMBER`, `DDD_CARD_EXP` (MM/YY), `DDD_CARD_CVV`, `DDD_CARD_ZIP` and optional
-  `DDD_CARD_NAME` in the environment (for scripts), or are typed at checkout. They are encrypted in memory for the payment call and never written by this
-  tool. On other platforms there is no storage; checkout prompts.
+- Card details go into the OS credential store with `ddd card set`: the macOS Keychain
+  (generic password item `ddd-card`) or the Windows Credential Manager (generic credential
+  `ddd-card`, via advapi32, no extra dependency). They can also come from `DDD_CARD_NUMBER`,
+  `DDD_CARD_EXP` (MM/YY), `DDD_CARD_CVV`, `DDD_CARD_ZIP` and optional `DDD_CARD_NAME` in the
+  environment (for scripts), or be typed at checkout. They are encrypted in memory for the
+  payment call and never written by this tool. On other platforms there is no store;
+  checkout prompts.
 
 ## Status
 
@@ -89,17 +96,18 @@ Working end to end: hours, menu, item choices, add with modifiers and notes, rem
 ASAP and scheduled pickup, pre-checkout validation. All verified live against Ding Dong Dogs
 on 2026-09-06.
 
-**Checkout works.** Verified live (check number returned, payment authorized on the card at placement and captured
-by the restaurant on acceptance, as Toast does for its own page). Toast has two card flows
-per restaurant, chosen by a feature flag the order page bootstraps (`oo-server-spi`). With
-it on, which is Ding Dong Dogs, the page tokenizes the card and hands the unconfirmed
-payment intent to `placeSpiOrder`; Toast authorizes, captures and creates the order in one
-step. With it off, the page confirms the intent itself and then places with
-`placePaidOrder`. `ddd checkout` reads the flag from the page and runs the matching flow
-(`--dry-run` prints which). Earlier versions confirmed client-side and then
-called `placeSpiOrder`, a mix neither flow uses, which Toast answered with an unhandled
-`CRITICAL_ERROR`; the diagnosis is in [DEBUGGING.md](DEBUGGING.md). The client flow is
-implemented from the same bundle but has not been exercised against a live restaurant.
+**Checkout works.** Verified live: the server-SPI flow returns a `PlaceOrderResponse` with
+the check number, and the card shows the authorization at placement (the restaurant's
+acceptance captures it, as with Toast's own page). Toast has two card flows per restaurant,
+chosen by a feature flag the order page bootstraps (`oo-server-spi`). With it on, which is
+Ding Dong Dogs, the page tokenizes the card and hands the unconfirmed payment intent to
+`placeSpiOrder`; Toast authorizes, captures and creates the order in one step. With it off,
+the page confirms the intent itself and then places with `placePaidOrder`. `ddd checkout`
+reads the flag from the page and runs the matching flow (`--dry-run` prints which). Earlier
+versions confirmed client-side and then called `placeSpiOrder`, a mix neither flow uses,
+which Toast answered with an unhandled `CRITICAL_ERROR`; the diagnosis is in
+[DEBUGGING.md](DEBUGGING.md). The client flow is implemented from the same bundle but has
+not been exercised against a live restaurant.
 
 Ding Dong Dogs is card-only for online orders (Toast reports no pay-at-pickup option), and
 only takeout is offered. Delivery, loyalty, gift cards and promo codes are not implemented.

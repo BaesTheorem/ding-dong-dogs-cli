@@ -77,16 +77,17 @@ generated per checkout and sent both as the intent's `sessionId` and the order's
 
 ## Verified
 
-Live, through the new flow: `spiCreatePaymentIntent` returned `REQUIRES_PAYMENT_METHOD`
-with the tax-inclusive cart total in cents, the card tokenized, and `placeSpiOrder` answered with a
-`PlaceOrderResponse`: a check number, `approvalStatus: NEEDS_APPROVAL`, the payment
-`AUTHORIZED` for the full amount, `estimatedFulfillmentDate` about fifteen minutes out.
-No `/confirm` call was made by this tool; Toast authorized inside the placement, as the
-bundle said it would. (`AUTHORIZED` at placement is Toast's normal state for a new online
-order; the restaurant's acceptance captures it.) The client flow (`oo-server-spi` off) is
-implemented from the same bundle and unit-tested, but no live restaurant has exercised it.
+Live, through the new flow: `spiCreatePaymentIntent` returns `REQUIRES_PAYMENT_METHOD` with
+the tax-inclusive cart total in cents, the card tokenizes, and `placeSpiOrder` answers with a
+`PlaceOrderResponse`: a check number, `approvalStatus: NEEDS_APPROVAL` until the restaurant
+accepts, the payment `AUTHORIZED` for the full amount, and `estimatedFulfillmentDate` in
+epoch milliseconds. This tool makes no `/confirm` call; Toast authorizes inside the
+placement, as the bundle says. `AUTHORIZED` at placement is Toast's normal state for a new
+online order; the restaurant's acceptance captures it. The client flow (`oo-server-spi`
+off) is implemented from the same bundle and unit-tested, but no live restaurant has
+exercised it.
 
-A related Toast defect, not this one: a quantity-N line carrying a priced modifier makes
-the cart and the created intent disagree by a cent (two quantity-1 lines match). The cart taxes the line whole, the intent looks
-to tax per unit and round each. In the server flow the intent amount is Toast's to
-reconcile.
+A related Toast defect, not this one: a quantity-N line carrying a priced modifier can make
+the cart total and the created intent disagree by a cent (two quantity-1 lines match). The
+cart taxes the line whole, the intent looks to tax per unit and round each. In the server
+flow the intent amount is Toast's to reconcile.

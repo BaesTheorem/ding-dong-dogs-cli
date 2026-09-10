@@ -5,7 +5,7 @@ description = "Order takeout from Ding Dong Dogs in Kansas City from the termina
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["curl_cffi>=0.10"]
+dependencies = ["curl_cffi>=0.10", "tzdata; sys_platform == 'win32'"]
 
 [project.scripts]
 ddd = "dddcli.cli:main"

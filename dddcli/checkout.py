@@ -24,8 +24,9 @@ Mixing the two, confirming client-side and then calling placeSpiOrder, asks Toas
 confirm an intent that is already confirmed. It answers with an unhandled CRITICAL_ERROR
 and creates no order, which is what earlier versions of this tool did.
 
-Card details are read from the macOS Keychain or typed at a prompt, live in memory
-for the duration of the command, and are never written to disk by this tool.
+Card details are read from the OS credential store (macOS Keychain or Windows Credential
+Manager) or typed at a prompt, live in memory for the duration of the command, and are
+never written to disk by this tool.
 """
 
 from __future__ import annotations
@@ -127,38 +128,152 @@ def _luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
-# ---- card storage (macOS Keychain) ---------------------------------------------
+# ---- card storage --------------------------------------------------------------
+#
+# macOS: the login Keychain, through the `security` tool (a generic password item).
+# Windows: the Credential Manager, through advapi32's CredWrite/CredRead/CredDelete
+# (a generic credential, persisted for this user on this machine). Both hold the card
+# as one JSON blob under the same name. Elsewhere there is no store: checkout prompts.
 
-def keychain_available() -> bool:
-    return platform.system() == "Darwin"
+CRED_TARGET = KEYCHAIN_SERVICE
+CRED_COMMENT = "Ding Dong Dogs CLI card"
+_CRED_TYPE_GENERIC = 1
+_CRED_PERSIST_LOCAL_MACHINE = 2
+_ERROR_NOT_FOUND = 1168
+
+
+def card_store() -> str | None:
+    """Name of the card store on this OS, or None when checkout has to ask for the card."""
+    system = platform.system()
+    if system == "Darwin":
+        return "macOS Keychain"
+    if system == "Windows":
+        return "Windows Credential Manager"
+    return None
 
 
 def save_card(card: Card) -> None:
-    if not keychain_available():
-        raise PaymentError("Card storage uses the macOS Keychain; on this OS the card is asked for at checkout.")
+    store = card_store()
+    if store is None:
+        raise PaymentError("No card store on this OS (macOS Keychain or Windows Credential Manager); the card is asked for at checkout.")
+    if store == "Windows Credential Manager":
+        _win_cred_write(CRED_TARGET, KEYCHAIN_ACCOUNT, card.to_json())
+        return
     subprocess.run(
-        ["security", "add-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-l", "Ding Dong Dogs CLI card",
+        ["security", "add-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-l", CRED_COMMENT,
          "-U", "-w", card.to_json()],
         check=True, capture_output=True,
     )
 
 
 def load_card() -> Card | None:
-    if not keychain_available():
-        return None
-    r = subprocess.run(["security", "find-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w"],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        return None
-    return Card.from_json(r.stdout.strip())
+    store = card_store()
+    if store == "Windows Credential Manager":
+        text = _win_cred_read(CRED_TARGET)
+        return Card.from_json(text) if text else None
+    if store == "macOS Keychain":
+        r = subprocess.run(["security", "find-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE, "-w"],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return None
+        return Card.from_json(r.stdout.strip())
+    return None
 
 
 def clear_card() -> bool:
-    if not keychain_available():
-        return False
-    r = subprocess.run(["security", "delete-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE],
-                       capture_output=True)
-    return r.returncode == 0
+    store = card_store()
+    if store == "Windows Credential Manager":
+        return _win_cred_delete(CRED_TARGET)
+    if store == "macOS Keychain":
+        r = subprocess.run(["security", "delete-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", KEYCHAIN_SERVICE],
+                           capture_output=True)
+        return r.returncode == 0
+    return False
+
+
+def _win_credential_struct():
+    """CREDENTIALW from wincred.h, in fixed-width types so the layout is the same wherever
+    it is built (DWORD is 32 bits on Windows; ctypes.c_ulong is not on other platforms).
+    Built on demand so the module imports on every OS."""
+    import ctypes
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", ctypes.c_uint32), ("dwHighDateTime", ctypes.c_uint32)]
+
+    class CREDENTIAL(ctypes.Structure):
+        _fields_ = [
+            ("Flags", ctypes.c_uint32),
+            ("Type", ctypes.c_uint32),
+            ("TargetName", ctypes.c_wchar_p),
+            ("Comment", ctypes.c_wchar_p),
+            ("LastWritten", FILETIME),
+            ("CredentialBlobSize", ctypes.c_uint32),
+            ("CredentialBlob", ctypes.POINTER(ctypes.c_char)),
+            ("Persist", ctypes.c_uint32),
+            ("AttributeCount", ctypes.c_uint32),
+            ("Attributes", ctypes.c_void_p),
+            ("TargetAlias", ctypes.c_wchar_p),
+            ("UserName", ctypes.c_wchar_p),
+        ]
+
+    return CREDENTIAL
+
+
+def _advapi32(credential_type):
+    import ctypes
+
+    api = ctypes.WinDLL("advapi32", use_last_error=True)  # type: ignore[attr-defined]
+    api.CredWriteW.argtypes = [ctypes.POINTER(credential_type), ctypes.c_uint32]
+    api.CredWriteW.restype = ctypes.c_int
+    api.CredReadW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.POINTER(credential_type))]
+    api.CredReadW.restype = ctypes.c_int
+    api.CredDeleteW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    api.CredDeleteW.restype = ctypes.c_int
+    api.CredFree.argtypes = [ctypes.c_void_p]
+    api.CredFree.restype = None
+    return api
+
+
+def _win_cred_write(target: str, user: str, secret: str) -> None:
+    import ctypes
+
+    credential_type = _win_credential_struct()
+    api = _advapi32(credential_type)
+    blob = secret.encode("utf-8")
+    buf = ctypes.create_string_buffer(blob, len(blob))
+    cred = credential_type()
+    cred.Type = _CRED_TYPE_GENERIC
+    cred.TargetName = target
+    cred.Comment = CRED_COMMENT
+    cred.CredentialBlobSize = len(blob)
+    cred.CredentialBlob = ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))
+    cred.Persist = _CRED_PERSIST_LOCAL_MACHINE
+    cred.UserName = user
+    if not api.CredWriteW(ctypes.byref(cred), 0):
+        raise PaymentError(f"Windows Credential Manager refused the card (error {ctypes.get_last_error()}).")
+
+
+def _win_cred_read(target: str) -> str | None:
+    import ctypes
+
+    credential_type = _win_credential_struct()
+    api = _advapi32(credential_type)
+    pcred = ctypes.POINTER(credential_type)()
+    if not api.CredReadW(target, _CRED_TYPE_GENERIC, 0, ctypes.byref(pcred)):
+        err = ctypes.get_last_error()
+        if err == _ERROR_NOT_FOUND:
+            return None
+        raise PaymentError(f"Windows Credential Manager could not read the card (error {err}).")
+    try:
+        cred = pcred.contents
+        return ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize).decode("utf-8")
+    finally:
+        api.CredFree(pcred)
+
+
+def _win_cred_delete(target: str) -> bool:
+    credential_type = _win_credential_struct()
+    return bool(_advapi32(credential_type).CredDeleteW(target, _CRED_TYPE_GENERIC, 0))
 
 
 def card_from_env() -> Card | None:
@@ -177,7 +292,7 @@ def card_from_env() -> Card | None:
 
 
 def prompt_card(name_default: str | None = None) -> Card:
-    print("Card details (kept in memory only; `ddd card set` stores them in the Keychain).")
+    print("Card details (kept in memory only; `ddd card set` stores them in the OS credential store).")
     number = getpass.getpass("Card number: ")
     exp = input("Expiry (MM/YY): ")
     cvv = getpass.getpass("CVV: ")
