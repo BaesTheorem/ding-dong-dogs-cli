@@ -160,9 +160,11 @@ def test_parse_toast_time_accepts_both_wire_formats():
 
 
 class FakeTransport:
-    def __init__(self, data):
+    def __init__(self, data, flags=None, country="US"):
         self.data = data
         self.calls = []
+        self._flags = flags or {}
+        self._country = country
 
     def query(self, op, variables, restaurant=True):
         self.calls.append((op, variables))
@@ -174,6 +176,12 @@ class FakeTransport:
 
     def restaurant_guid(self):
         return "rx"
+
+    def flags(self):
+        return self._flags
+
+    def country(self):
+        return self._country
 
     def _log(self, *a):
         pass
@@ -196,21 +204,74 @@ def test_add_unwraps_out_of_stock():
     assert t.calls[0][1]["input"]["createCartInput"]["restaurantGuid"] == "rx"
 
 
-def test_place_order_uses_place_spi_order_shape():
+def test_parse_flags_and_country_from_the_page():
+    html = (
+        '<script>window.__APOLLO_STATE__ = {"R:1":{"i18n":{"__typename":"I18n","currency":"USD","locale":"en-US","country":"US"}}};\n'
+        '    window.__FLAGS_STATE__ = {"oo-server-spi":true,"oo-spi-surcharging-fe":true,"nv5-sites-web-cache-ttl":600};\n'
+        '    window.__FLAGS_CONTEXT__ = {"key":"rx"};</script>'
+    )
+    flags = toast.parse_flags(html)
+    assert flags["oo-server-spi"] is True and flags["nv5-sites-web-cache-ttl"] == 600
+    assert toast.parse_country(html) == "US"
+    assert toast.parse_flags("<html/>") == {} and toast.parse_country("<html/>") is None
+    assert toast.parse_flags("window.__FLAGS_STATE__ = {oops;") == {}
+
+
+def test_flow_follows_the_page_flag_and_country():
+    from dddcli import checkout
+    assert checkout.flow(FakeTransport({}, {"oo-server-spi": True})) == checkout.FLOW_SERVER
+    assert checkout.flow(FakeTransport({}, {"oo-server-spi": False})) == checkout.FLOW_CLIENT
+    assert checkout.flow(FakeTransport({}, {})) == checkout.FLOW_CLIENT
+    with pytest.raises(checkout.PaymentError, match="Adyen"):
+        checkout.flow(FakeTransport({}, {"oo-server-spi": True}, country="CA"))
+    assert checkout.surcharging(FakeTransport({}, {"oo-spi-surcharging-fe": True}))
+    assert not checkout.surcharging(FakeTransport({}, {}))
+
+
+def test_server_flow_places_the_unconfirmed_intent():
     from dddcli import checkout
     done = {"placeOrder": {"__typename": "PlaceOrderResponse", "completedOrder": {"guid": "o1", "checkNumber": 7}}}
     t = FakeTransport(done)
-    intent = {"id": "pi", "sessionSecret": "sec"}
-    out = checkout.place_order(t, "cart1", {"firstName": "A"}, 2.5, intent, "pm1", fraud_session_id="f", intent_ref="ref")
+    # The intent's own id goes on the order, never a confirmed payment's externalReferenceId:
+    # in this flow nothing has been confirmed yet, Toast does that inside placeSpiOrder.
+    intent = {"id": "pi", "sessionSecret": "sec", "externalReferenceId": "ext"}
+    out = checkout.place_spi_order(t, "cart1", {"firstName": "A"}, 2.5, intent, "pm1", "sift-session")
     assert out["checkNumber"] == 7
     op, variables = t.calls[0]
     assert op == "PlaceSpiOrder"
-    spi = variables["input"]["spiPaymentData"]
-    assert spi == {"paymentIntentId": "ref", "paymentMethodId": "pm1", "sessionSecret": "sec", "saveCard": False, "ccFraudSessionId": "f"}
+    assert variables["input"]["spiPaymentData"] == {
+        "paymentIntentId": "pi", "paymentMethodId": "pm1", "sessionSecret": "sec", "saveCard": False, "ccFraudSessionId": "sift-session",
+    }
     assert variables["input"]["tipAmount"] == 2.5 and variables["input"]["cartGuid"] == "cart1"
+    assert "surchargeAmount" not in variables["input"] and "paymentId" not in variables["input"]
     t = FakeTransport({"placeOrder": {"__typename": "PlaceOrderError", "placeOrderErrorCode": "PAYMENT_FAILED", "message": "declined"}})
     with pytest.raises(checkout.PaymentError, match="declined"):
-        checkout.place_order(t, "cart1", {}, 0, intent, "pm1")
+        checkout.place_spi_order(t, "cart1", {}, 0, intent, "pm1", "s")
+
+
+def test_client_flow_updates_then_places_the_confirmed_payment():
+    from dddcli import checkout
+    ok = {"oo": {"spiUpdatePaymentIntent": {"__typename": "OnlineOrderingSpiUpdatePaymentIntentSuccessResponse", "surchargeAmount": None}}}
+    t = FakeTransport(ok)
+    intent = {"id": "pi", "sessionSecret": "sec"}
+    checkout.update_intent(t, "cart1", intent, "a@b.c", 1.0, 0.48, "pm1")
+    op, variables = t.calls[0]
+    assert op == "UpdatePaymentIntent"
+    assert variables["input"]["paymentIntentId"] == "pi" and variables["input"]["paymentMethodId"] == "pm1"
+    assert variables["input"]["amountDetails"] == {"tip": 100, "tax": {"totalTaxAmount": 48}}
+    done = {"placeOrder": {"__typename": "PlaceOrderResponse", "completedOrder": {"guid": "o1", "checkNumber": 8}}}
+    t = FakeTransport(done)
+    # Without surcharging only the confirmed payment's reference travels.
+    checkout.place_paid_order(t, "cart1", {"firstName": "A"}, 1.0, "ext-ref")
+    op, variables = t.calls[0]
+    assert op == "PlacePaidOrder"
+    assert variables["input"]["paymentId"] == "ext-ref"
+    assert "paymentMethodId" not in variables["input"] and "spiPaymentData" not in variables["input"]
+    # With it, the web app also sends the payment method and the update's surcharge (null when none).
+    t = FakeTransport(done)
+    checkout.place_paid_order(t, "cart1", {}, 1.0, "ext-ref", "pm1", None, with_surcharging=True)
+    variables = t.calls[0][1]
+    assert variables["input"]["paymentMethodId"] == "pm1" and variables["input"]["surchargeAmount"] is None
 
 
 def test_selection_input_scales_modifier_quantity_with_the_item():
@@ -234,25 +295,6 @@ def test_card_from_env(monkeypatch):
     monkeypatch.setenv("DDD_CARD_NUMBER", "1234")
     with pytest.raises(checkout.PaymentError, match="DDD_CARD_"):
         checkout.card_from_env()
-
-
-def test_update_intent_is_skipped_when_it_would_change_nothing():
-    from dddcli import checkout
-    # spiCreatePaymentIntent already returns the tax-inclusive total, so a tipless
-    # order has nothing to update and the web app sends no update call.
-    intent = {"id": "pi", "sessionSecret": "sec", "amount": 448}
-    t = FakeTransport({})
-    assert checkout.update_intent_if_needed(t, "cart1", intent, "a@b.c", 0, 0.48, 4.48) is None
-    assert t.calls == []
-    # A tip changes the amount, so the update still goes out.
-    ok = {"oo": {"spiUpdatePaymentIntent": {"__typename": "OnlineOrderingSpiUpdatePaymentIntentSuccessResponse"}}}
-    t = FakeTransport(ok)
-    checkout.update_intent_if_needed(t, "cart1", intent, "a@b.c", 1.0, 0.48, 5.48)
-    assert t.calls[0][0] == "UpdatePaymentIntent"
-    # So does a mismatch between the intent and the cart, tip or no tip.
-    t = FakeTransport(ok)
-    checkout.update_intent_if_needed(t, "cart1", intent, "a@b.c", 0, 0.48, 9.99)
-    assert t.calls[0][0] == "UpdatePaymentIntent"
 
 
 def test_card_fields_survive_bracketed_paste():
@@ -292,10 +334,13 @@ def test_place_retries_only_the_server_crash(monkeypatch):
     monkeypatch.setattr(checkout.time, "sleep", lambda _s: None)
     intent = {"id": "pi", "sessionSecret": "sec"}
 
-    # A crash is an unhandled server exception, so it is worth waiting out. Retrying costs
-    # nothing because /confirm already made the authorization and placing adds no other.
+    def placer(t):
+        return lambda: checkout.place_spi_order(t, "cart1", {}, 0, intent, "pm1", "s")
+
+    # A crash is an unhandled server exception, so it is worth one more try. Retrying
+    # cannot authorize twice: the intent is the unit of authorization and capture.
     t = SequenceTransport([CRASH, CRASH, DONE])
-    out = checkout.place_order_with_retry(t, "cart1", {}, 0, intent, "pm1", attempts=5)
+    out = checkout.place_with_retry(t, placer(t), attempts=5)
     assert out["checkNumber"] == 42
     assert len(t.calls) == 3
 
@@ -303,11 +348,11 @@ def test_place_retries_only_the_server_crash(monkeypatch):
     declined = {"placeOrder": {"__typename": "PlaceOrderError", "placeOrderErrorCode": "PAYMENT_FAILED", "message": "declined"}}
     t = SequenceTransport([declined, DONE])
     with pytest.raises(checkout.PaymentError, match="declined"):
-        checkout.place_order_with_retry(t, "cart1", {}, 0, intent, "pm1", attempts=5)
+        checkout.place_with_retry(t, placer(t), attempts=5)
     assert len(t.calls) == 1
 
     # Exhausting the attempts surfaces the crash rather than swallowing it.
     t = SequenceTransport([CRASH, CRASH])
     with pytest.raises(checkout.PlaceCrashed, match="CRITICAL_ERROR"):
-        checkout.place_order_with_retry(t, "cart1", {}, 0, intent, "pm1", attempts=2)
+        checkout.place_with_retry(t, placer(t), attempts=2)
     assert len(t.calls) == 2

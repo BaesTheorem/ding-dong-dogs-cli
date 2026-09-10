@@ -89,20 +89,17 @@ Working end to end: hours, menu, item choices, add with modifiers and notes, rem
 ASAP and scheduled pickup, pre-checkout validation. All verified live against Ding Dong Dogs
 on 2026-09-06.
 
-**Checkout does not complete, and it can leave a pending card authorization. Do not rely on
-`ddd checkout` for a live order yet.** The flow gets through payment: it creates and updates
-the payment intent, tokenizes the card, and the confirm step authorizes it (the card sees a
-pending hold for the order total). The final `placeSpiOrder` mutation then fails with
-`CRITICAL_ERROR: Sorry, your request failed due to an unknown error`, so no order is created.
-Capture only happens when the order is placed, so an uncaptured hold like that drops off on its own (a few
-days), but that is the bank's behavior, not something this tool guarantees.
-
-`placeSpiOrder` is confirmed to be the correct mutation, and the request matches the web app
-field for field. The failure is an unhandled server exception isolated to the SPI capture
-path (the same cart fails gracefully through the non-SPI mutation), and it reproduces even
-against an unconfirmed intent. It cannot be diagnosed further without a real authorized
-payment. See [DEBUGGING.md](DEBUGGING.md) for the full trace and the leading hypotheses.
-Until it is resolved, order through Toast's own page.
+**Checkout was rewritten to run the flow Toast's own order page runs. It has not been
+exercised live yet.** Toast has two card flows per
+restaurant, chosen by a feature flag the order page bootstraps (`oo-server-spi`). With it on,
+which is Ding Dong Dogs, the page tokenizes the card and hands the unconfirmed payment intent
+to `placeSpiOrder`; Toast authorizes, captures and creates the order in one step. With it
+off, the page confirms the intent itself (that is the card authorization) and then places
+with `placePaidOrder`. Earlier versions of this tool confirmed client-side and then called
+`placeSpiOrder`, a mix neither flow uses, and Toast answered with an unhandled
+`CRITICAL_ERROR`: no order, plus a pending hold that dropped on its own. `ddd checkout` now
+reads the flag from the page and runs the matching flow (`--dry-run` prints which). The
+diagnosis is in [DEBUGGING.md](DEBUGGING.md).
 
 Ding Dong Dogs is card-only for online orders (Toast reports no pay-at-pickup option), and
 only takeout is offered. Delivery, loyalty, gift cards and promo codes are not implemented.
@@ -117,9 +114,10 @@ only takeout is offered. Delivery, loyalty, gift cards and promo codes are not i
 | Session | Mutations need `Toast-Session-ID` from the order page: `<div id="session" data-content="base64 {id, issuedAt, expiresAt}">`. Valid one hour, bound to the client IP. If the API call arrives from a different address family than the page fetch did, Cloudflare answers with its block page, so everything is pinned to IPv4 |
 | Cart | `addItemToCartV2` creates the cart when `cartGuid` is null (`createCartInput: {restaurantGuid, orderSource: ONLINE, cartFulfillmentInput: {fulfillmentType: ASAP}, digitalSurface: OO_BASIC}`). `cartV2` (the read) does not echo the cart guid. Selections carry `guid` for `deleteItemFromCartV2` |
 | Pickup | `updateFulfillmentAndValidate` with `{fulfillmentType: ASAP\|FUTURE, diningOptionBehavior: TAKE_OUT, fulfillmentDateTime}`; slots come from `diningOptions(futureFulfillmentDaysAhead)`. Toast writes times as `...T19:15:00+0000` in one place and `...T19:30:00.000+00:00` in another |
-| Payment | `oo.spiCreatePaymentIntent` (the site also sends a reCAPTCHA Enterprise token; the gateway does without), `oo.spiUpdatePaymentIntent` for tip and tax in cents, `oo.spiGetClientToken` for a JWT, then `POST https://payments.toasttab.com/v1/payment-methods` `{type: CARD, card: {keyId, cardData}, sessionSecret, usage: null, setupFutureUsage: null, billingDetails}` and `POST .../v1/payment-intents/{id}/confirm` `{sessionSecret, paymentMethodData: {scope: SINGLE_USE, type: CARD}, paymentMethodId, email}`, both with `Authorization: Bearer <jwt>`, `Toast-Restaurant-External-ID`, `Toast-HC-Correlation-ID: <intent id>` |
+| Flags | The order page bootstraps the web app's LaunchDarkly flags as `window.__FLAGS_STATE__` and the restaurant record (with `i18n.country`) as `window.__APOLLO_STATE__`. `oo-server-spi` picks the card flow below; non-US restaurants use Adyen and `PlaceCcOrder` (not implemented) |
+| Payment | `oo.spiCreatePaymentIntent` (the site also sends a reCAPTCHA Enterprise token; the gateway does without) returns the intent id, `sessionSecret` and the tax-inclusive amount; `oo.spiGetClientToken` gives a JWT; then `POST https://payments.toasttab.com/v1/payment-methods` `{type: CARD, card: {keyId, cardData}, sessionSecret, usage: null, setupFutureUsage: null, billingDetails}` with `Authorization: Bearer <jwt>`, `Toast-Restaurant-External-ID`, `Toast-HC-Correlation-ID: <intent id>` tokenizes the card. Server flow (`oo-server-spi` on): that is all, `placeSpiOrder` confirms and captures. Client flow: `oo.spiUpdatePaymentIntent` with tip and tax in cents, `POST .../v1/payment-intents/{id}/confirm` `{sessionSecret, paymentMethodData: {scope: SINGLE_USE, type: CARD}, paymentMethodId, email}` (the authorization), then `placePaidOrder` |
 | Card encryption | RSA-OAEP with SHA-1 (MGF1-SHA1, empty label) over `JSON.stringify({cardNumber, zipCode, cvv, expMonth, expYear[, cardholderName]})`, base64. The public key and `keyId` are literals in the hosted checkout iframe (`/assets/checkout.production.*.html`); `dddcli/cardcrypto.py` implements it in the standard library |
-| Order | `placeSpiOrder` with `customer {firstName, lastName, email, phone, phoneCountryCode}`, `digitalSurface`, `isCustomDomain`, `tipAmount`, `deliveryCommunicationConsentGiven`, `spiPaymentData {paymentIntentId, paymentMethodId, sessionSecret, saveCard, ccFraudSessionId}`. Returns `PlaceOrderResponse.completedOrder` (check number, promised time, payments) or a `PlaceOrderError` |
+| Order | Common fields: `customer {firstName, lastName, email, phone, phoneCountryCode}`, `digitalSurface`, `isCustomDomain`, `tipAmount`, `deliveryCommunicationConsentGiven`. `placeSpiOrder` adds `spiPaymentData {paymentIntentId (the intent id), paymentMethodId, sessionSecret, saveCard, ccFraudSessionId (the same uuid sent as the intent's `sessionId`)}`. `placePaidOrder` adds `paymentId` (the confirmed payment's `externalReferenceId`) and, with `oo-spi-surcharging-fe` on, `paymentMethodId` and `surchargeAmount`. Both return `PlaceOrderResponse.completedOrder` (check number, promised time, payments) or a `PlaceOrderError` |
 
 ## Tests
 

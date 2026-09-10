@@ -13,6 +13,9 @@ What the wire actually requires (all verified live against Ding Dong Dogs, 2026-
   (<div id="session" data-content="base64 json">), valid for an hour and bound to the
   client IP. The page host has AAAA records and the API host is reached differently,
   so both are pinned to IPv4 to keep the binding intact.
+- The same page bootstraps the web app's LaunchDarkly flags (window.__FLAGS_STATE__)
+  and the restaurant record (window.__APOLLO_STATE__, which carries i18n.country).
+  The checkout flow branches on both, so they are read whenever the page is fetched.
 """
 
 from __future__ import annotations
@@ -42,6 +45,9 @@ _DOC_RE = re.compile(
 )
 _META_RE = re.compile(r'([A-Za-z_$][A-Za-z0-9_$]*)\.__meta__=\{hash:"([0-9a-f]+)"\}')
 _VERSION_RE = re.compile(r'VERSION:"(\d+)"')
+_FLAGS_RE = re.compile(r"window\.__FLAGS_STATE__\s*=\s*")
+_COUNTRY_RE = re.compile(r'"i18n":\{[^{}]*?"country":"([A-Z]{2})"')
+PAGE_TTL = 3600
 
 
 class ToastError(Exception):
@@ -89,6 +95,24 @@ def parse_session(html: str) -> tuple[str, float]:
     return data["id"], expires
 
 
+def parse_flags(html: str) -> dict:
+    """Feature-flag values the page bootstraps into window.__FLAGS_STATE__ ({} if absent)."""
+    m = _FLAGS_RE.search(html)
+    if not m:
+        return {}
+    try:
+        flags, _ = json.JSONDecoder().raw_decode(html, m.end())
+    except ValueError:
+        return {}
+    return flags if isinstance(flags, dict) else {}
+
+
+def parse_country(html: str) -> str | None:
+    """The restaurant's i18n country from the page's Apollo state, e.g. "US"."""
+    m = _COUNTRY_RE.search(html)
+    return m.group(1) if m else None
+
+
 class Transport:
     def __init__(self, store: Store, slug: str = DEFAULT_SLUG, verbose: bool = False):
         self.store = store
@@ -124,15 +148,36 @@ class Transport:
             raise ToastError(f"Restaurant page returned HTTP {r.status_code} (Cloudflare challenge?). Try again in a minute.")
         return r.text
 
+    def read_page(self) -> None:
+        """Fetch the restaurant page and cache everything it carries: the session id,
+        the flag bootstrap and the restaurant's country."""
+        html = self.fetch_page()
+        sid, expires = parse_session(html)
+        self.state["session"] = {"id": sid, "expires": expires}
+        self.state["page"] = {"flags": parse_flags(html), "country": parse_country(html), "fetched": time.time()}
+        self.store.save_state()
+        self._log("new session id, valid until", datetime.fromtimestamp(expires, tz=timezone.utc).isoformat())
+
     def session_id(self, force: bool = False) -> str:
         sess = self.state.get("session") or {}
         if not force and sess.get("id") and sess.get("expires", 0) - time.time() > 120:
             return sess["id"]
-        sid, expires = parse_session(self.fetch_page())
-        self.state["session"] = {"id": sid, "expires": expires}
-        self.store.save_state()
-        self._log("new session id, valid until", datetime.fromtimestamp(expires, tz=timezone.utc).isoformat())
-        return sid
+        self.read_page()
+        return self.state["session"]["id"]
+
+    def page(self) -> dict:
+        """Cached page facts (flags, country), re-read after PAGE_TTL or when never read."""
+        page = self.state.get("page") or {}
+        if not page or time.time() - page.get("fetched", 0) > PAGE_TTL:
+            self.read_page()
+            page = self.state["page"]
+        return page
+
+    def flags(self) -> dict:
+        return self.page().get("flags") or {}
+
+    def country(self) -> str | None:
+        return self.page().get("country")
 
     def restaurant_guid(self) -> str:
         guid = self.state.get("guid")

@@ -1,19 +1,28 @@
 """Paying for a cart and placing the order.
 
-Toast's online ordering pays through its "SPI" flow (verified live 2026-09-06):
+Toast's online ordering has two card flows, and the restaurant page says which one its
+web app runs (window.__FLAGS_STATE__["oo-server-spi"], read through Transport.flags()).
 
-1. spiCreatePaymentIntent (GraphQL) for the cart -> intent id + sessionSecret.
-   The web app also attaches a reCAPTCHA Enterprise token here; the gateway accepts
-   the call without one.
-2. spiUpdatePaymentIntent with the tip and tax breakdown.
-3. spiGetClientToken -> a JWT the hosted checkout iframe uses as its bearer token.
-4. The iframe encrypts the card (see cardcrypto) and POSTs it to
-   payments.toasttab.com/v1/payment-methods, then POSTs
-   /v1/payment-intents/{id}/confirm. Both authorized with that JWT plus the
-   restaurant guid. This module makes the same two calls.
-5. placeSpiOrder (GraphQL) with the intent id, payment method id and session secret
-   captures the authorized payment and creates the order. (placePaidOrder is the
-   sibling for payments the client already captured; its input has no spiPaymentData.)
+Server SPI (flag on; Ding Dong Dogs, read from the live bundle 2026-09-10):
+
+1. spiCreatePaymentIntent (GraphQL) for the cart -> intent id + sessionSecret. The web
+   app also attaches a reCAPTCHA Enterprise token; the gateway accepts the call without.
+2. spiGetClientToken -> a JWT the hosted checkout iframe uses as its bearer token.
+3. The iframe encrypts the card (see cardcrypto) and POSTs it to
+   payments.toasttab.com/v1/payment-methods with that JWT. This module makes the same
+   call. Nothing is confirmed client-side.
+4. placeSpiOrder (GraphQL) with the intent id, the payment method id and the session
+   secret. Toast confirms (authorizes) and captures the payment and creates the order in
+   one step. There is no spiUpdatePaymentIntent in this flow; the tip rides on the order.
+
+Client SPI (flag off): steps 1 to 3, then spiUpdatePaymentIntent with the tip and tax in
+cents, then POST /v1/payment-intents/{id}/confirm (which authorizes the card), then
+placePaidOrder carrying the confirmed payment's externalReferenceId as paymentId, which
+Toast captures.
+
+Mixing the two, confirming client-side and then calling placeSpiOrder, asks Toast to
+confirm an intent that is already confirmed. It answers with an unhandled CRITICAL_ERROR
+and creates no order, which is what earlier versions of this tool did.
 
 Card details are read from the macOS Keychain or typed at a prompt, live in memory
 for the duration of the command, and are never written to disk by this tool.
@@ -27,7 +36,7 @@ import re
 import platform
 import subprocess
 import time
-import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from dddcli import cardcrypto
@@ -179,6 +188,31 @@ def prompt_card(name_default: str | None = None) -> Card:
 
 # ---- Toast calls ---------------------------------------------------------------
 
+FLOW_SERVER = "server-spi"
+FLOW_CLIENT = "client-spi"
+
+
+def flow(t: Transport) -> str:
+    """Which card flow this restaurant runs (see the module docstring).
+
+    The web app decides with two values the restaurant page bootstraps: the country
+    (non-US restaurants pay through Adyen and a different mutation, not supported here)
+    and the oo-server-spi flag.
+    """
+    country = t.country() or "US"
+    if country != "US":
+        raise PaymentError(f"This restaurant is in {country} and pays through Adyen, which ddd does not support.")
+    return FLOW_SERVER if t.flags().get("oo-server-spi") else FLOW_CLIENT
+
+
+def surcharging(t: Transport) -> bool:
+    """With oo-spi-surcharging-fe on, the web app threads the payment method id through
+    the intent update and, in the client flow, sends the update's surchargeAmount on the
+    order. The Cart query carries no surcharge amounts, so in the server flow the amount
+    is omitted, as the web app omits it for a restaurant with none."""
+    return bool(t.flags().get("oo-spi-surcharging-fe"))
+
+
 def _unwrap(resp: dict | None, ok_type: str, what: str) -> dict:
     if not resp:
         raise PaymentError(f"{what}: empty response")
@@ -193,7 +227,9 @@ def client_token(t: Transport) -> str:
     return resp["token"]
 
 
-def create_intent(t: Transport, cart_guid: str) -> dict:
+def create_intent(t: Transport, cart_guid: str, session_id: str) -> dict:
+    """`session_id` is the web app's Sift session id: one per checkout, sent here and again
+    as the order's ccFraudSessionId."""
     data = t.mutate(
         "CreatePaymentIntent",
         {"input": {
@@ -201,14 +237,16 @@ def create_intent(t: Transport, cart_guid: str) -> dict:
             "paymentMethodConfigId": PAYMENT_METHOD_CONFIG_ID,
             "orderSource": "ONLINE",
             "deliveryProvider": None,
-            "sessionId": str(uuid.uuid4()),
+            "sessionId": session_id,
             "reCaptchaToken": None,
         }},
     )
     return _unwrap((data.get("oo") or {}).get("spiCreatePaymentIntent"), "OnlineOrderingSpiCreatePaymentIntentSuccessResponse", "payment intent")
 
 
-def update_intent(t: Transport, cart_guid: str, intent: dict, email: str, tip: float, tax: float) -> dict:
+def update_intent(t: Transport, cart_guid: str, intent: dict, email: str, tip: float, tax: float,
+                  payment_method_id: str | None = None) -> dict:
+    """Client flow only. The web app always sends this before confirming, tip or no tip."""
     data = t.mutate(
         "UpdatePaymentIntent",
         {"input": {
@@ -220,27 +258,11 @@ def update_intent(t: Transport, cart_guid: str, intent: dict, email: str, tip: f
             "tipAmount": round(tip, 2),
             "fundraisingAmount": 0,
             "enableConfirmRetry": False,
-            "paymentMethodId": None,
+            "paymentMethodId": payment_method_id,
             "amountDetails": {"tip": int(round(tip * 100)), "tax": {"totalTaxAmount": int(round(tax * 100))}},
         }},
     )
     return _unwrap((data.get("oo") or {}).get("spiUpdatePaymentIntent"), "OnlineOrderingSpiUpdatePaymentIntentSuccessResponse", "payment intent update")
-
-
-def update_intent_if_needed(t: Transport, cart_guid: str, intent: dict, email: str, tip: float,
-                            tax: float, total: float) -> dict | None:
-    """Update the intent only when that actually changes the amount, as the site does.
-
-    spiCreatePaymentIntent already returns the tax-inclusive cart total (verified live
-    2026-09-08: a $4.00 cart carrying $0.48 tax creates an intent with amount 448), so
-    with no tip there is nothing left to set and the web app makes no update call at all.
-    Sending a redundant one is a suspect in the placeSpiOrder capture failure. Whenever
-    the amounts disagree the update still goes out, so this cannot under-authorize.
-    """
-    want = int(round(total * 100))
-    if not tip and intent.get("amount") == want:
-        return None
-    return update_intent(t, cart_guid, intent, email, tip, tax)
 
 
 def _payments_post(t: Transport, token: str, intent_id: str | None, path: str, body: dict) -> dict:
@@ -270,6 +292,7 @@ def _payments_post(t: Transport, token: str, intent_id: str | None, path: str, b
 
 
 def create_payment_method(t: Transport, token: str, intent: dict, card: Card, email: str) -> dict:
+    """Tokenize the card the way the hosted iframe does. This neither authorizes nor charges."""
     key_id, blob = cardcrypto.encrypt_card(card.number, card.exp_month, card.exp_year, card.cvv, card.zip_code, card.name)
     body = {
         "type": "CARD",
@@ -283,6 +306,8 @@ def create_payment_method(t: Transport, token: str, intent: dict, card: Card, em
 
 
 def confirm_payment(t: Transport, token: str, intent: dict, payment_method_id: str, email: str) -> dict:
+    """Client flow only: authorizes the card (a pending hold appears). Never call this in
+    the server flow; placeSpiOrder does it and crashes on an intent confirmed twice."""
     body = {
         "sessionSecret": intent["sessionSecret"],
         "paymentMethodData": {"scope": "SINGLE_USE", "type": "CARD"},
@@ -293,29 +318,18 @@ def confirm_payment(t: Transport, token: str, intent: dict, payment_method_id: s
     return _payments_post(t, token, intent["id"], f"v1/payment-intents/{intent['id']}/confirm", body)
 
 
-def place_order(t: Transport, cart_guid: str, customer: dict, tip: float, intent: dict, payment_method_id: str,
-                fraud_session_id: str | None = None, intent_ref: str | None = None) -> dict:
-    """Place the order against an authorized payment. `intent_ref` is what the web app passes
-    as paymentIntentId after a confirm (the confirmed payment's externalReferenceId); it
-    defaults to the intent id."""
-    data = t.mutate(
-        "PlaceSpiOrder",
-        {"input": {
-            "cartGuid": cart_guid,
-            "customer": customer,
-            "digitalSurface": "OO_BASIC",
-            "isCustomDomain": False,
-            "tipAmount": round(tip, 2),
-            "deliveryCommunicationConsentGiven": True,
-            "spiPaymentData": {
-                "paymentIntentId": intent_ref or intent["id"],
-                "paymentMethodId": payment_method_id,
-                "sessionSecret": intent["sessionSecret"],
-                "saveCard": False,
-                "ccFraudSessionId": fraud_session_id or str(uuid.uuid4()),
-            },
-        }},
-    )
+def _order_input(cart_guid: str, customer: dict, tip: float) -> dict:
+    return {
+        "cartGuid": cart_guid,
+        "customer": customer,
+        "digitalSurface": "OO_BASIC",
+        "isCustomDomain": False,
+        "tipAmount": round(tip, 2),
+        "deliveryCommunicationConsentGiven": True,
+    }
+
+
+def _placed(data: dict, op: str) -> dict:
     resp = data.get("placeOrder") or {}
     kind = resp.get("__typename")
     if kind == "PlaceOrderResponse":
@@ -324,28 +338,52 @@ def place_order(t: Transport, cart_guid: str, customer: dict, tip: float, intent
         raise PaymentError(f"Toast changed the cart while ordering ({resp.get('placeOrderCartUpdatedErrorCode')}): {resp.get('message')}. Check `ddd cart` and try again.")
     code = resp.get("placeOrderErrorCode") or kind
     if code == "CRITICAL_ERROR":
-        raise PlaceCrashed(f"Order not placed ({code}): {resp.get('message') or resp}")
-    raise PaymentError(f"Order not placed ({code}): {resp.get('message') or resp}")
+        raise PlaceCrashed(f"{op}: order not placed ({code}): {resp.get('message') or resp}")
+    raise PaymentError(f"{op}: order not placed ({code}): {resp.get('message') or resp}")
 
 
-def place_order_with_retry(t: Transport, cart_guid: str, customer: dict, tip: float, intent: dict,
-                           payment_method_id: str, fraud_session_id: str | None = None,
-                           intent_ref: str | None = None, attempts: int = 5, delay: float = 4.0) -> dict:
-    """Place, retrying only when Toast throws its unhandled CRITICAL_ERROR.
+def place_spi_order(t: Transport, cart_guid: str, customer: dict, tip: float, intent: dict,
+                    payment_method_id: str, fraud_session_id: str) -> dict:
+    """Server flow: hand Toast the unconfirmed intent and the tokenized card; it confirms,
+    captures and creates the order in one step. Nothing is authorized before this call,
+    so a refusal here leaves no hold."""
+    inp = _order_input(cart_guid, customer, tip)
+    inp["spiPaymentData"] = {
+        "paymentIntentId": intent["id"],
+        "paymentMethodId": payment_method_id,
+        "sessionSecret": intent["sessionSecret"],
+        "saveCard": False,
+        "ccFraudSessionId": fraud_session_id,
+    }
+    return _placed(t.mutate("PlaceSpiOrder", {"input": inp}), "placeSpiOrder")
 
-    Retrying is free. The card authorization is created by /confirm, and placing against
-    an already confirmed intent does not create another one, so a single hold pays for
-    every attempt here. That makes this the one way to test whether the capture failure
-    is a propagation race between confirm and place without spending another hold per try.
 
-    A graceful refusal (declined card, cart changed underneath) is a real answer and is
-    raised immediately; only the server-side crash is worth waiting out.
+def place_paid_order(t: Transport, cart_guid: str, customer: dict, tip: float, payment_id: str,
+                     payment_method_id: str | None = None, surcharge_amount: float | None = None,
+                     with_surcharging: bool = False) -> dict:
+    """Client flow: the card is already authorized; Toast captures the payment the confirmed
+    payment's externalReferenceId names. With surcharging on, the web app also sends the
+    payment method id and the intent update's surchargeAmount (null when there is none)."""
+    inp = _order_input(cart_guid, customer, tip)
+    inp["paymentId"] = payment_id
+    if with_surcharging:
+        inp["paymentMethodId"] = payment_method_id
+        inp["surchargeAmount"] = surcharge_amount
+    return _placed(t.mutate("PlacePaidOrder", {"input": inp}), "placePaidOrder")
+
+
+def place_with_retry(t: Transport, place: Callable[[], dict], attempts: int = 3, delay: float = 3.0) -> dict:
+    """Run a placement, retrying only Toast's unhandled CRITICAL_ERROR.
+
+    A retry does not authorize again: the authorization belongs to the payment intent and
+    Toast will not confirm or capture the same intent twice (observed live: repeated
+    placements against one confirmed intent produced a single authorization). A graceful refusal,
+    a declined card or a cart changed underneath, is a real answer and is raised at once.
     """
     last: PlaceCrashed | None = None
     for n in range(1, attempts + 1):
         try:
-            return place_order(t, cart_guid, customer, tip, intent, payment_method_id,
-                               fraud_session_id=fraud_session_id, intent_ref=intent_ref)
+            return place()
         except PlaceCrashed as e:
             last = e
             t._log(f"place attempt {n}/{attempts} crashed; " + (f"retrying in {delay:.0f}s" if n < attempts else "giving up"))  # noqa: SLF001

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -312,8 +313,9 @@ class Cli:
         result = cartmod.validate(self.t, cart["guid"], customer)
         for w in (result.get("warnings") or []) + (result.get("info") or []):
             print(f"    Note from Toast: {w.get('message')}")
+        flow = checkout.flow(self.t)
         if self.args.dry_run:
-            print("Dry run: cart validated, nothing charged.")
+            print(f"Dry run: cart validated, nothing charged. Payment flow here: {flow}.")
             return 0
         card = checkout.card_from_env()
         if card:
@@ -329,21 +331,31 @@ class Cli:
                 return 1
         if not card or self.args.new_card:
             card = checkout.prompt_card(f"{customer['firstName']} {customer['lastName']}")
-        intent = checkout.create_intent(self.t, cart["guid"])
-        self.t._log("intent created for", f"{intent.get('amount')} vs cart total {int(round(total * 100))}")  # noqa: SLF001
-        checkout.update_intent_if_needed(self.t, cart["guid"], intent, customer["email"], tip,
-                                         float(order.get("taxV2") or 0), total)
+        self.t._log("payment flow", flow)  # noqa: SLF001
+        session_id = str(uuid.uuid4())
+        intent = checkout.create_intent(self.t, cart["guid"], session_id)
+        self.t._log("intent", intent.get("id"), intent.get("status"), "amount", intent.get("amount"),  # noqa: SLF001
+                    "vs cart total", int(round(total * 100)))
         token = checkout.client_token(self.t)
         pm = checkout.create_payment_method(self.t, token, intent, card, customer["email"])
         pm_id = pm.get("id") or pm.get("paymentMethodId")
         if not pm_id:
             raise checkout.PaymentError(f"Card was not accepted: {pm}")
-        confirmed = checkout.confirm_payment(self.t, token, intent, pm_id, customer["email"])
-        self.t._log("confirm result", json.dumps(confirmed)[:400])  # noqa: SLF001
-        payment = confirmed.get("payment") or confirmed
-        ref = payment.get("externalReferenceId") or intent["id"]
         who = {**customer, "phoneCountryCode": "1"}
-        done = checkout.place_order_with_retry(self.t, cart["guid"], who, tip, intent, pm_id, intent_ref=ref)
+        if flow == checkout.FLOW_SERVER:
+            done = checkout.place_with_retry(
+                self.t, lambda: checkout.place_spi_order(self.t, cart["guid"], who, tip, intent, pm_id, session_id))
+        else:
+            with_surcharging = checkout.surcharging(self.t)
+            updated = checkout.update_intent(self.t, cart["guid"], intent, customer["email"], tip,
+                                             float(order.get("taxV2") or 0), pm_id if with_surcharging else None)
+            confirmed = checkout.confirm_payment(self.t, token, intent, pm_id, customer["email"])
+            self.t._log("confirm result", json.dumps(confirmed)[:400])  # noqa: SLF001
+            payment = confirmed.get("payment") or confirmed
+            ref = payment.get("externalReferenceId") or intent["id"]
+            done = checkout.place_with_retry(
+                self.t, lambda: checkout.place_paid_order(self.t, cart["guid"], who, tip, ref, pm_id,
+                                                          updated.get("surchargeAmount"), with_surcharging))
         self.state["last_order"] = {"guid": done.get("guid"), "placed": time.time()}
         self.remember_cart(None)
         if self.args.json:
