@@ -231,15 +231,22 @@ class Transport:
     def query(self, op: str, variables: dict, restaurant: bool = True) -> dict:
         if op not in self.hashes:
             raise ToastError(f"No persisted hash for {op}; run `ddd refresh`.")
-        for attempt in (1, 2):
+        force = False
+        for attempt in (1, 2, 3):
             params = {"operationName": op, "variables": json.dumps(variables), "extensions": json.dumps(self._extensions(op))}
+            headers = self._headers(op, restaurant)
+            # Since late Sept 2026 the gateway answers queries without a session with "Forbidden".
+            headers["Toast-Session-ID"] = self.session_id(force=force)
             self._log("GET", op, json.dumps(variables)[:200])
-            r = self.http.get(GATEWAY, params=params, headers=self._headers(op, restaurant), timeout=60)
+            r = self.http.get(GATEWAY, params=params, headers=headers, timeout=60)
             try:
                 return self._decode(op, r)
             except GraphQLError as e:
-                if attempt == 1 and self._stale(e):
+                if attempt < 3 and self._stale(e):
                     self.refresh_hashes()
+                    continue
+                if attempt < 3 and self._forbidden(e):
+                    force = True
                     continue
                 raise
         raise AssertionError("unreachable")
