@@ -106,8 +106,10 @@ the page confirms the intent itself and then places with `placePaidOrder`. `ddd 
 reads the flag from the page and runs the matching flow (`--dry-run` prints which). Earlier
 versions confirmed client-side and then called `placeSpiOrder`, a mix neither flow uses,
 which Toast answered with an unhandled `CRITICAL_ERROR`; the diagnosis is in
-[DEBUGGING.md](DEBUGGING.md). The client flow is implemented from the same bundle but has
-not been exercised against a live restaurant.
+[DEBUGGING.md](DEBUGGING.md). The client flow is implemented from the same bundle. Ding Dong Dogs
+moved to it by 2026-10-22, and a live order on that date went through it: the order came
+back `NEEDS_APPROVAL` with the card `AUTHORIZED`, then `APPROVED` after the restaurant
+accepted it. So `oo-server-spi` can change on a restaurant without notice.
 
 Ding Dong Dogs is card-only for online orders (Toast reports no pay-at-pickup option), and
 only takeout is offered. Delivery, loyalty, gift cards and promo codes are not implemented.
